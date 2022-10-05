@@ -62,6 +62,7 @@ appendNeighbor(ID, N, List, I, J) ->
 	NewList.
 
 getGrid(ID, N, Type, List, I, J) ->
+
 	case Type of
 		"Imperfect-3D-Grid" ->
 			% In I = -1 layer
@@ -341,7 +342,19 @@ start(NumOfWorker, Topoplgy, Algorithm) ->
 
 	TimeStart = erlang:monotonic_time()/10000,
 	register(termination, spawn(main, stop, [TimeStart])),
-	create(NumOfWorker, 1, NumOfWorker, Topoplgy, Algorithm).
+
+	if 
+		(Topoplgy == "3D-Grid") or (Topoplgy == "Imperfect-3D-Grid") ->
+			N = trunc(math:floor(math:sqrt(NumOfWorker))),
+			TotalWorkers = N*N,
+			create(TotalWorkers, 1, TotalWorkers, Topoplgy, Algorithm);
+		true ->
+			create(NumOfWorker, 1, NumOfWorker, Topoplgy, Algorithm)
+	end.
+	% create(NumOfWorker, 1, TotalWorkers, Topoplgy, Algorithm).
+	% WorkerName = getWorkerName(1000),
+	% NeighborList = getNeighborList(Topoplgy, TotalWorkers, 1000),
+	% io:format("~p~n", [NeighborList]).
 
 stop(TimeStart) ->
 
