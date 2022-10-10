@@ -158,7 +158,7 @@ getGrid(ID, N, Type, List, I, J) ->
 					doNothing
 			end;
 
-		"3D-Grid"->
+		"2D-Grid"->
 			if 
 				I == -1 ->
 					if 
@@ -224,16 +224,16 @@ getNeighborList(Type, NumOfWorker, ID) ->
 		"Full-Network" ->
 			RetList = [NumOfWorker],
 			RetList;
-		"3D-Grid" ->
+		"2D-Grid" ->
 			RetList = getGrid(ID, N, Type, [], -1, 0),
 			RetList;
 		"Line" ->
 			if 
-				ID == 0 ->
+				ID == 1 ->
 					RetList = [ID+1],
 					RetList;
-				ID == NumOfWorker-1 ->
-					RetList = [ID-1],
+				ID == NumOfWorker ->
+					RetList = [ID],
 					RetList;
 				true ->
 					RetList = [ID-1, ID+1],
@@ -252,6 +252,20 @@ getNeighborList(Type, NumOfWorker, ID) ->
 			end
 	end.
 
+sendRumor(ID, NeighborList) ->
+
+	RID = getRandomNeighbor(length(NeighborList), NeighborList),
+	NName = getWorkerName(RID),
+
+	NName ! {work, self()},
+	receive 
+		work ->
+			NName ! {rumor, ID},
+			sendRumor(ID, NeighborList);
+		{delete, ToDelete} ->
+			NewNeighborList = lists:delete(NeighborList, ToDelete),
+			sendRumor(ID, NewNeighborList)
+	end.
 %%%
 %%% Gossip
 %% TODO 座標化
@@ -259,16 +273,28 @@ worker(WorkerName, ID, Times, NeighborList)->
 
 	receive
 		{rumor, FromID} ->
-			% io:format("~p receive rumor from ~p, receive rumor ~p times~n", [WorkerName, getWorkerName(FromID),Times+1]),			
-			if 
-				Times+1 == 10 ->
-					io:format("~p terminate the process because it receive ~p times of rumor~n", [WorkerName, Times+1]),
-					termination ! terminate;
+
+			if
+				Times == 0 ->
+					Pid = spawn(main, sendRumor, [ID, NeighborList]),
+					worker(WorkerName, ID, Times+1, NeighborList);
 				true ->
-					RID = getRandomNeighbor(length(NeighborList), NeighborList),
-					NName = getWorkerName(RID),
-					NName ! {rumor, ID},
-					worker(WorkerName, ID, Times+1, NeighborList)
+					if 
+						Times+1 >= 10 ->
+							termination ! {terminate, WorkerName, Times + 1},
+							worker(WorkerName, ID, Times, NeighborList);
+						true ->
+							worker(WorkerName, ID, Times+1, NeighborList)
+					end
+			end;
+		{work, SubActor} ->
+			if
+				Times == 10 ->
+					SubActor ! {delete, WorkerName},
+					worker(WorkerName, ID, Times, NeighborList);
+				true ->
+					SubActor ! work,
+					worker(WorkerName, ID, Times, NeighborList)
 			end
 	end.
 
@@ -276,37 +302,43 @@ worker(WorkerName, ID, Times, NeighborList)->
 worker(WorkerName, ID, Rounds, NeighborList, S, W, PrevRatio) ->
 
 	receive
-		{rumor, FromID, S_, W_} ->
+		{rumor, S_, W_} ->
 
-			% io:format("~p receive rumor from ~p~n", [WorkerName, getWorkerName(FromID)]),
 			NewS = S + S_,
 			NewW = W + W_,
 			NewRatio = NewS/NewW,
 
 			RID = getRandomNeighbor(length(NeighborList), NeighborList),
 			NName = getWorkerName(RID),
-
+			NName ! {rumor, NewS/2, NewW/2},
 			if
-				abs(NewRatio - PrevRatio) < 0.001 ->
+				abs(NewRatio - PrevRatio) =< 0.001 ->
 					if
 						Rounds+1 == 3 ->
-							io:format("~p terminate. Current ratio is ~.8f, Previous ratio is ~.8f, diff is ~.8f~n", [WorkerName, NewRatio, PrevRatio, abs(NewRatio-PrevRatio)]),
-							termination ! terminate;
+							termination ! {terminate, NewRatio},
+							worker(WorkerName, ID, 0, NeighborList, NewS/2, NewW/2, NewRatio);
 						true ->
-							NName ! {rumor, ID, NewS/2, NewW/2},
 							worker(WorkerName, ID, Rounds+1, NeighborList, NewS/2, NewW/2, NewRatio)
 					end;
 				true ->
-					NName ! {rumor, ID, NewS/2, NewW/2},
 					worker(WorkerName, ID, 0, NeighborList, NewS/2, NewW/2, NewRatio)
 			end;
 		start ->
-			io:format("~p start sending rumor~n", [WorkerName]),
 			RID = getRandomNeighbor(length(NeighborList), NeighborList),
 			NName = getWorkerName(RID),
-			NName ! {rumor, ID, S/2, W/2},
+			NName ! {rumor, S/2, W/2},
 			worker(WorkerName, ID, Rounds, NeighborList, S/2, W/2, PrevRatio)
 	end.
+
+
+pushSumSend(TotalWorkers, ID, 0) ->
+	every_worker_start_sending_rumor;
+
+pushSumSend(TotalWorkers, ID, Count) ->
+		WorkerName = getWorkerName(Count),
+		WorkerName ! start,
+		pushSumSend(TotalWorkers, ID, Count-1).
+
 
 %%% create worker
 create(TotalWorkers, ID, 0, Topoplgy, Algorithm) ->
@@ -317,8 +349,7 @@ create(TotalWorkers, ID, 0, Topoplgy, Algorithm) ->
 			WorkerName = getWorkerName(rand:uniform(TotalWorkers)),
 			WorkerName ! {rumor, "Server"};
 		"Push-Sum" ->
-			WorkerName = getWorkerName(rand:uniform(TotalWorkers)),
-			WorkerName ! start
+			pushSumSend(TotalWorkers, ID, TotalWorkers)
 	end;
 
 create(TotalWorkers, ID, Cnt, Topoplgy, Algorithm) ->
@@ -341,27 +372,38 @@ create(TotalWorkers, ID, Cnt, Topoplgy, Algorithm) ->
 start(NumOfWorker, Topoplgy, Algorithm) ->
 
 	TimeStart = erlang:monotonic_time()/10000,
-	register(termination, spawn(main, stop, [TimeStart])),
+	register(termination, spawn(main, stop, [TimeStart, 0, 10000])),
 
 	if 
-		(Topoplgy == "3D-Grid") or (Topoplgy == "Imperfect-3D-Grid") ->
+		(Topoplgy == "2D-Grid") or (Topoplgy == "Imperfect-3D-Grid") ->
 			N = trunc(math:floor(math:sqrt(NumOfWorker))),
 			TotalWorkers = N*N,
 			create(TotalWorkers, 1, TotalWorkers, Topoplgy, Algorithm);
 		true ->
 			create(NumOfWorker, 1, NumOfWorker, Topoplgy, Algorithm)
 	end.
-	% create(NumOfWorker, 1, TotalWorkers, Topoplgy, Algorithm).
-	% WorkerName = getWorkerName(1000),
-	% NeighborList = getNeighborList(Topoplgy, TotalWorkers, 1000),
-	% io:format("~p~n", [NeighborList]).
 
-stop(TimeStart) ->
+stop(TimeStart, Times, PrevRatio) ->
 
 	receive
-		terminate ->
-			TimeEnd = erlang:monotonic_time()/10000,
-			RunTime = TimeEnd - TimeStart,
-			io:format("Total time is ~p~n", [RunTime]),
-			erlang:halt()
+		{terminate, Ratio} ->
+			if 
+				TimeStart == -1 ->
+					stop(TimeStart, Times, PrevRatio);
+				true ->
+					TimeEnd = erlang:monotonic_time()/10000,
+					RunTime = TimeEnd - TimeStart,
+					io:format("Total time is ~.2f, Ratio is ~.10f~n", [RunTime, Ratio]),
+					stop(-1, Times, Ratio)
+			end;
+		{terminate, WorkerName, Time} ->
+			if
+				Times == 10 ->
+					TimeEnd = erlang:monotonic_time()/10000,
+					RunTime = TimeEnd - TimeStart,
+					io:format("Total time is ~p~n", [RunTime]),
+					stop(TimeStart, Times+1, PrevRatio);
+				true ->
+					stop(TimeStart, Times+1, PrevRatio)
+			end
 	end.
