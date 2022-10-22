@@ -1,7 +1,7 @@
 -module(chord).
 -compile(export_all).
 
--define(M, 10).
+-define(M, 15).
 
 getNode(ID) ->
 	list_to_atom("node" ++ lists:flatten(io_lib:format("~p", [ID]))).
@@ -93,6 +93,7 @@ sendRequestToNodes(NodeList, Size) ->
 	Node = lists:nth(Size, NodeList),
 	NodeName = getNode(Node),
 	Key = getRandNum(round(math:pow(2, ?M))),
+	io:format("Send Key ~p to Node ~p~n", [Key, Node]),
 	NodeName ! {sendRequest, Key, 0, Node},
 	sendRequestToNodes(NodeList, Size-1).
 
@@ -119,7 +120,7 @@ output(Data, StoreData0, StoreData1, StoreData2, StoreData3) ->
 		print ->
 			Tmp = StoreData0 / StoreData2,
 			Ans = Tmp / StoreData1,
-			io:format("NumberOfNodes ~p, NumberOfRequest ~p, Average is ~.6f~n", [StoreData1, StoreData2, Ans]),
+			io:format("Average Hop Per Nodes(Total/NumOfRequest) is ~.6f~nAverage Hop Per Request(Total/(NumOfNodes*NumOfRequest)) is ~.6f~n", [Tmp, Ans]),
 			output(Data, StoreData0, StoreData1, StoreData2, StoreData3);
 		clear ->
 			output(0, 0, 0, 0, 0);
@@ -197,12 +198,18 @@ node(NID, Successor, Predecessor, FingerTable, TotalHop) ->
 			node(NID, Successor, Predecessor, FingerTable, TotalHop);
 		{fixTable, TargetID} ->
 			if 
+				(NID == Successor) and (NID == Predecessor) -> % only one node
+					NewFingerTable = FingerTable ++ [{getKey(TargetID), NID}],
+					SortedNewFingerTable = lists:keysort(2, NewFingerTable),
+					node(NID, Successor, Predecessor, SortedNewFingerTable, TotalHop);
 				(NID == TargetID) ->
 					NewFingerTable = FingerTable ++ [{getKey(TargetID), NID}],
-					node(NID, Successor, Predecessor, NewFingerTable, TotalHop);					
+					SortedNewFingerTable = lists:keysort(2, NewFingerTable),
+					node(NID, Successor, Predecessor, SortedNewFingerTable, TotalHop);					
 				(NID < TargetID) and (TargetID =< Successor) ->
 					NewFingerTable = FingerTable ++ [{getKey(TargetID), Successor}],
-					node(NID, Successor, Predecessor, NewFingerTable, TotalHop);
+					SortedNewFingerTable = lists:keysort(2, NewFingerTable),
+					node(NID, Successor, Predecessor, SortedNewFingerTable, TotalHop);
 				true ->
 
 					if
@@ -211,10 +218,12 @@ node(NID, Successor, Predecessor, FingerTable, TotalHop) ->
 							if
 								NID < TargetID ->
 									NewFingerTable = FingerTable ++ [{getKey(TargetID), Successor}],
-									node(NID, Successor, Predecessor, NewFingerTable, TotalHop);
+									SortedNewFingerTable = lists:keysort(2, NewFingerTable),
+									node(NID, Successor, Predecessor, SortedNewFingerTable, TotalHop);
 								TargetID =< Successor ->
 									NewFingerTable = FingerTable ++ [{getKey(TargetID), Successor}],
-									node(NID, Successor, Predecessor, NewFingerTable, TotalHop);	
+									SortedNewFingerTable = lists:keysort(2, NewFingerTable),
+									node(NID, Successor, Predecessor, SortedNewFingerTable, TotalHop);	
 								true ->		
 									SuccessorName = getNode(Successor),
 									SuccessorName ! {fixTable, findSuccessor, TargetID, NID},
@@ -228,13 +237,17 @@ node(NID, Successor, Predecessor, FingerTable, TotalHop) ->
 			end;
 		{find, NewSuccessor, TargetID} ->
 			NewFingerTable = FingerTable ++ [{getKey(TargetID), NewSuccessor}],
-			node(NID, Successor, Predecessor, NewFingerTable, TotalHop);
+			SortedNewFingerTable = lists:keysort(2, NewFingerTable),
+			node(NID, Successor, Predecessor, SortedNewFingerTable, TotalHop);
 
 		{sendRequest, Key, Hop, Start} ->
 
 			StartName = getNode(Start),
 
 			if
+				NID == Key ->
+					io:format("Node~p find Key ~p is store in ~p~n", [Start, Key, NID]),
+					StartName ! {findKey, Hop};					
 				(NID < Key) and (Key =< Successor) ->
 					io:format("Node~p find Key ~p is store in ~p~n", [Start, Key, Successor]),
 					StartName ! {findKey, Hop};
@@ -249,14 +262,13 @@ node(NID, Successor, Predecessor, FingerTable, TotalHop) ->
 									io:format("Node~p find Key ~p is store in ~p~n", [Start, Key, Successor]),
 									StartName ! {findKey, Hop};
 								true ->
-									ClosetNode = closetPreceding(FingerTable, length(FingerTable), Key),
+									ClosetNode = closetPreceding(FingerTable, length(FingerTable), Key, Successor, NID),
 									ClosetName = getNode(ClosetNode),
 									ClosetName ! {sendRequest, Key, Hop+1, Start}
 							end;
 						true ->
-							ClosetNode = closetPreceding(FingerTable, length(FingerTable), Key),
+							ClosetNode = closetPreceding(FingerTable, length(FingerTable), Key, Successor, NID),
 							ClosetName = getNode(ClosetNode),
-							% io:format("NID ~p, Key ~p, ClosetName ~p~n", [NID, Key, ClosetName]),
 							ClosetName ! {sendRequest, Key, Hop+1, Start}
 					end
 			end,
@@ -267,23 +279,22 @@ node(NID, Successor, Predecessor, FingerTable, TotalHop) ->
 			chordRing ! {return, TotalHop, NID},
 			node(NID, Successor, Predecessor, FingerTable, TotalHop);
 		clearFingerTable ->
-			io:format("Hello~n"),
 			node(NID, Successor, Predecessor, [], TotalHop)
 	end.
 
-closetPreceding(FingerTable, 0, Key) ->
-	N = lists:nth(length(FingerTable), FingerTable),
-	{A, B} = N,
-	B;
+closetPreceding(FingerTable, 0, Key, Successor, NID) ->
+	Successor;
 
-closetPreceding(FingerTable, Size, Key) ->
+closetPreceding(FingerTable, Size, Key, Successor, NID) ->
 	N = lists:nth(Size, FingerTable),
 	{A, B} = N,
 	if
+		B == NID ->
+			closetPreceding(FingerTable, Size-1, Key, Successor, NID);
 		Key > B ->
 			B;
 		true ->
-			closetPreceding(FingerTable, Size-1, Key)
+			closetPreceding(FingerTable, Size-1, Key, Successor, NID)
 	end.
 
 createLoop(0) ->
@@ -302,6 +313,10 @@ sendRequest(NumOfRequest) ->
 	chordRing ! sendRequest,
 	sendRequest(NumOfRequest-1).
 
+stepStart() ->
+	register(chordRing, spawn(chord, chordRing, [[]])),
+	register(output, spawn(chord, output, [0, 0, 0, 0, 0])).
+
 start(NumOfNodes, NumOfRequest) ->
 	register(chordRing, spawn(chord, chordRing, [[]])),
 	register(output, spawn(chord, output, [0, 0, NumOfNodes, NumOfRequest, 0])),
@@ -316,5 +331,5 @@ pidToString(Pid) ->
 	PidStr = pid_to_list(Pid).
 
 sha1(String) ->
-	<<Hash:160>> = crypto:hash(sha, String),
+	<<Hash:256>> = crypto:hash(sha256, String),
     Hash rem round(math:pow(2, ?M)).
